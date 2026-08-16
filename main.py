@@ -126,6 +126,16 @@ DEFAULT_PROTOCOL = "vless-ws"
 FINGERPRINTS = ("chrome", "firefox", "safari", "ios", "android", "edge", "360", "qq", "random", "randomized")
 DEFAULT_FINGERPRINT = "chrome"
 
+# لوکیشن نمایشی هر کانفیگ (فقط برچسب/پرچم روی UI و نام لینک است — نکته مهم: چون این سرور
+# تک‌نود است، ترافیک همچنان از همین سرور خارج می‌شود و انتخاب لوکیشن، IP خروجی واقعی را
+# تغییر نمی‌دهد؛ صرفاً برای دسته‌بندی/نام‌گذاری کانفیگ‌ها روی پنل و ربات تلگرام است)
+LOCATIONS = {
+    "auto": {"name": "پیش‌فرض (این سرور)", "flag": "🌐"},
+    "es":   {"name": "اسپانیا",            "flag": "🇪🇸"},
+    "pt":   {"name": "پرتقال",              "flag": "🇵🇹"},
+}
+DEFAULT_LOCATION = "auto"
+
 # پیش‌فرض ALPN بر اساس نوع ترابرد (اگر کاربر مقدار دستی نده)
 DEFAULT_ALPN_BY_PROTOCOL = {
     "vless-ws": "http/1.1",
@@ -283,9 +293,11 @@ def generate_vless_link(
 def vless_link_for_link(link: dict, uid: str, host: str) -> str:
     """generate_vless_link رو با تنظیمات دستی همون کانفیگ (fingerprint/alpn/port) صدا می‌زنه."""
     proto = link.get("protocol", DEFAULT_PROTOCOL)
+    loc = LOCATIONS.get(link.get("location") or DEFAULT_LOCATION, LOCATIONS[DEFAULT_LOCATION])
+    flag_prefix = f"{loc['flag']}-" if link.get("location") and link.get("location") != DEFAULT_LOCATION else ""
     return generate_vless_link(
         uid, host,
-        remark=f"omid-{link.get('label','')}",
+        remark=f"omid-{flag_prefix}{link.get('label','')}",
         protocol=proto,
         fingerprint=link.get("fingerprint"),
         alpn=link.get("alpn"),
@@ -401,6 +413,7 @@ async def ensure_default_link():
                     "port": DEFAULT_PORT,
                     "ip_limit": 0,
                     "speed_limit_bytes": DEFAULT_SPEED_LIMIT,
+                    "location": DEFAULT_LOCATION,
                 }
                 asyncio.create_task(save_state())
         _default_link_created = True
@@ -730,6 +743,7 @@ async def make_link(
     port: int = DEFAULT_PORT,
     ip_limit: int = 0,
     speed_limit_bytes: int = 0,
+    location: str = DEFAULT_LOCATION,
 ) -> tuple[str, dict]:
     if protocol not in PROTOCOLS:
         protocol = DEFAULT_PROTOCOL
@@ -738,6 +752,9 @@ async def make_link(
         fingerprint = DEFAULT_FINGERPRINT
     if not (MIN_PORT <= port <= MAX_PORT):
         port = DEFAULT_PORT
+    location = (location or DEFAULT_LOCATION).strip().lower()
+    if location not in LOCATIONS:
+        location = DEFAULT_LOCATION
     uid = generate_uuid()
     async with LINKS_LOCK:
         LINKS[uid] = {
@@ -756,6 +773,7 @@ async def make_link(
             "port": port,
             "ip_limit": max(0, ip_limit),
             "speed_limit_bytes": max(0, speed_limit_bytes),
+            "location": location,
         }
     if sub_id:
         async with SUBS_LOCK:
@@ -855,6 +873,13 @@ async def remove_sub_group(sub_id: str) -> str | None:
     log_activity("sub", f"گروه «{name}» حذف شد", "warn")
     return name
 
+@app.get("/api/locations")
+async def list_locations(_=Depends(require_auth)):
+    return {
+        "locations": [{"id": k, **v} for k, v in LOCATIONS.items()],
+        "default": DEFAULT_LOCATION,
+    }
+
 # ── Link Management ───────────────────────────────────────────────────────────
 @app.post("/api/links")
 async def create_link(request: Request, _=Depends(require_auth)):
@@ -889,6 +914,7 @@ async def create_link(request: Request, _=Depends(require_auth)):
         port=port,
         ip_limit=ip_limit,
         speed_limit_bytes=speed_limit_bytes,
+        location=body.get("location") or DEFAULT_LOCATION,
     )
 
     host = get_host(request)
@@ -969,7 +995,10 @@ async def update_link(uid: str, request: Request, _=Depends(require_auth)):
             link["speed_limit_bytes"] = 0 if sv <= 0 else parse_speed_to_bytes(sv, su)
             from speed_limit import reset_bucket
             reset_bucket(uid)
-        if any(k in body for k in ("label", "note", "limit_value", "expires_days", "fingerprint", "alpn", "port", "ip_limit", "speed_limit_value")):
+        if "location" in body:
+            loc = str(body.get("location") or DEFAULT_LOCATION).strip().lower()
+            link["location"] = loc if loc in LOCATIONS else DEFAULT_LOCATION
+        if any(k in body for k in ("label", "note", "limit_value", "expires_days", "fingerprint", "alpn", "port", "ip_limit", "speed_limit_value", "location")):
             log_activity("link", f"کانفیگ «{link['label']}» ویرایش شد", "info")
         new_sub = body.get("sub_id", "UNCHANGED")
         if new_sub != "UNCHANGED":
